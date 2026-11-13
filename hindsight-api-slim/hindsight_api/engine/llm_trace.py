@@ -42,6 +42,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Literal, TypeVar
 
+from opentelemetry import trace
 from pydantic import BaseModel
 
 from ..schema_context import get_current_bank_id
@@ -86,10 +87,9 @@ def llm_requests_locked_in_id_order(table: str, where: str) -> str:
 class LLMTraceContext:
     """Attribution for in-flight LLM calls, bound by ``ConfiguredLLMProvider``.
 
-    ``trace_id`` and ``operation_span_id`` are generated once per operation
-    invocation (one ``with_config`` call), so every LLM call of a single
-    reflect/retain/consolidation run shares them — reproducing the OTel
-    parent (operation span) → children (LLM calls) hierarchy in the DB.
+    ``trace_id`` follows the active OpenTelemetry trace, when present.
+    ``operation_span_id`` is a separate per-invocation identifier: several
+    operations can share a distributed trace without sharing their memories.
     """
 
     bank_id: str | None = None
@@ -360,12 +360,15 @@ def current_trace_context() -> LLMTraceContext | None:
 def new_trace_context(
     bank_id: str | None, operation: str | None, metadata: dict[str, Any] | None = None
 ) -> LLMTraceContext:
-    """A fresh operation run: its own trace id and operation span."""
+    """A fresh operation run within the caller's distributed trace, if any."""
+    span_context = trace.get_current_span().get_span_context()
     return LLMTraceContext(
         bank_id=bank_id,
         operation=operation,
         metadata=dict(metadata or {}),
-        trace_id=str(uuid.uuid4()),
+        # Non-recording (unsampled) contexts still have valid correlation IDs.
+        # Keep the existing standalone ID when no distributed context exists.
+        trace_id=trace.format_trace_id(span_context.trace_id) if span_context.is_valid else str(uuid.uuid4()),
         operation_span_id=str(uuid.uuid4()),
     )
 
@@ -386,7 +389,7 @@ def operation_trace_context(
 ) -> LLMTraceContext | None:
     """The trace a ``with_config`` wrapper attributes its LLM calls to.
 
-    One trace + operation span per ``with_config()`` call — i.e. per operation
+    One history operation span per ``with_config()`` call — i.e. per operation
     invocation — so a reflect/retain/consolidation run groups its calls as parent
     (operation) → children (LLM calls). Except when the same operation already bound
     a trace for its whole run (a mental-model refresh wraps its reflect pass AND the
@@ -997,8 +1000,9 @@ class LLMTraceRecorder:
         Merges the explicitly passed ids with any accumulated on the context
         (``record_created_memory_ids`` / ``record_source_memory_ids``), de-dupes
         preserving order, and patches ``metadata.memory_ids`` (outputs created)
-        and ``metadata.source_memory_ids`` (inputs consumed) on all rows sharing
-        the trace_id. No-op when tracing is off or nothing was produced.
+        and ``metadata.source_memory_ids`` (inputs consumed) on this operation's
+        rows. A distributed trace may contain several operations in the same bank.
+        No-op when tracing is off or nothing was produced.
 
         Fire-and-forget: the snapshotted patch is applied on a background task so
         the retain/consolidation operation never waits on the trace write. The
@@ -1023,9 +1027,21 @@ class LLMTraceRecorder:
             return
         # Not under the default key: this task drains that key itself, and a task
         # waiting on its own key would wait on itself forever.
-        self._writes.schedule(self._attach_memory_ids(trace_ctx.bank_id, trace_ctx.trace_id, patch), key="memory_ids")
+        self._writes.schedule(
+            self._attach_memory_ids(
+                trace_ctx.bank_id, trace_ctx.trace_id, patch, operation_span_id=trace_ctx.operation_span_id
+            ),
+            key="memory_ids",
+        )
 
-    async def _attach_memory_ids(self, bank_id: str | None, trace_id: str, patch: dict[str, Any]) -> None:
+    async def _attach_memory_ids(
+        self,
+        bank_id: str | None,
+        trace_id: str,
+        patch: dict[str, Any],
+        *,
+        operation_span_id: str | None = None,
+    ) -> None:
         """Background worker: flush this trace's writes, then patch its rows."""
         # The trace rows are buffered; write them first so the UPDATE patches rows
         # that already exist rather than racing ahead of them.
@@ -1039,11 +1055,12 @@ class LLMTraceRecorder:
             table = f"{schema}.llm_requests"
             async with acquire_with_retry(pool, max_retries=1) as conn:
                 await conn.execute(
-                    f"{llm_requests_locked_in_id_order(table, 'bank_id = $1 AND trace_id = $2')} "
+                    f"{llm_requests_locked_in_id_order(table, 'bank_id = $1 AND trace_id = $2 AND parent_span_id IS NOT DISTINCT FROM $4')} "
                     f"UPDATE {table} t SET metadata = t.metadata || $3::jsonb FROM target WHERE t.id = target.id",
                     bank_id,
                     trace_id,
                     json.dumps(patch),
+                    operation_span_id,
                 )
         except Exception as e:
             logger.warning(f"LLM trace memory_id attach failed for trace={trace_id}: {e}")

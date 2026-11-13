@@ -2960,6 +2960,18 @@ Hindsight provides OpenTelemetry-based observability for LLM calls, conforming t
 - Error tracking with finish reasons
 - Conforms to OpenTelemetry GenAI semantic conventions v1.37+
 
+When model-call history is enabled (`HINDSIGHT_API_LLM_TRACE_ENABLED`), its
+`trace_id` is the active OpenTelemetry trace ID, formatted as 32 lowercase hex
+digits. This applies to unsampled traces too. Queued retain tasks continue the
+request context in the worker, so their history can be correlated with the
+gateway's trace-to-client mapping. Configure tracing on both the API and worker.
+Without an active trace, history retains its independently generated UUIDs.
+
+Several operations can share a distributed trace. `parent_span_id` remains a
+separate, per-operation history identifier, and memory attribution is scoped to
+that identifier and the bank. History span IDs are not OpenTelemetry span IDs.
+Caller labels are not added to baggage by Hindsight.
+
 **OTLP-Compatible Backends:**
 
 The tracing implementation uses standard OTLP HTTP protocol, so it works with any OTLP-compatible backend:
