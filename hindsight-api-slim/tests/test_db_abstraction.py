@@ -1216,6 +1216,8 @@ class TestOracleOpsInsertFactsBatch:
             observation_scopes_list=["global"],
             text_signals_list=["positive"],
             attachment_ids_list=["[]"],
+            origin_traceparent="00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+            origin_tracestate="vendor=value",
         )
 
         query, rows_data = mock_conn.executemany.call_args.args
@@ -1241,6 +1243,8 @@ class TestOracleOpsInsertFactsBatch:
         assert row[13] == ["nature", "sky"], "row[13] should be decoded tags list"
         assert row[14] == "global", "row[14] should be observation_scopes"
         assert row[15] == "positive", "row[15] should be text_signals"
+        assert row[17] == "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+        assert row[18] == "vendor=value"
 
     @pytest.mark.asyncio
     async def test_sql_column_count_matches_values(self, ops, mock_conn):

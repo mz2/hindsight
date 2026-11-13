@@ -155,6 +155,8 @@ class OracleOps(DataAccessOps):
         text_signals_list: list,
         attachment_ids_list: list,
         text_search_extension: str = "native",
+        origin_traceparent: str | None = None,
+        origin_tracestate: str | None = None,
     ) -> list[str]:
         table = self._get_mu_table()
         # Generate UUIDs client-side so we can use executemany (single network
@@ -186,14 +188,16 @@ class OracleOps(DataAccessOps):
                     # check wants exactly that — pass it through rather than
                     # encoding it twice.
                     attachment_ids_list[i] or "[]",
+                    origin_traceparent,
+                    origin_tracestate,
                 )
             )
         await conn.executemany(
             f"""
             INSERT INTO {table} (id, bank_id, text, embedding, event_date, occurred_start,
                 occurred_end, mentioned_at, context, fact_type, metadata, chunk_id, document_id,
-                tags, observation_scopes, text_signals, attachment_ids)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+                tags, observation_scopes, text_signals, attachment_ids, origin_traceparent, origin_tracestate)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
             """,
             rows_data,
         )

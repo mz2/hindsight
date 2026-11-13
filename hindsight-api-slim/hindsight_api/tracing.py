@@ -13,7 +13,10 @@ to Langfuse (or any OTLP-compatible backend) via OTLP HTTP protocol.
 import json
 import logging
 import time
+from collections.abc import Iterator
 from contextlib import contextmanager
+from contextvars import ContextVar
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Optional, cast
 
 from opentelemetry import trace
@@ -368,6 +371,79 @@ def create_operation_span(operation: str, bank_id: str | None = None):
 def is_tracing_enabled() -> bool:
     """Check if tracing is enabled."""
     return _tracing_enabled
+
+
+@dataclass(frozen=True)
+class MemoryTraceOrigin:
+    """W3C identifiers saved with a memory, without baggage or request content."""
+
+    traceparent: str | None = None
+    tracestate: str | None = None
+
+
+def current_memory_trace_origin() -> MemoryTraceOrigin:
+    from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
+
+    carrier: dict[str, str] = {}
+    TraceContextTextMapPropagator().inject(carrier)
+    return MemoryTraceOrigin(carrier.get("traceparent"), carrier.get("tracestate"))
+
+
+@dataclass
+class _ConsolidationTrace:
+    span: trace.Span
+    linked: set[tuple[int, int]] = field(default_factory=set)
+
+
+_consolidation_trace: ContextVar[_ConsolidationTrace | None] = ContextVar("consolidation_trace", default=None)
+# Bound the bookkeeping even if a continuously busy bank takes many rounds.
+# This matches the SDK's default link limit; the truncation is visible on the span.
+MAX_CONSOLIDATION_LINKS = 128
+
+
+@contextmanager
+def create_consolidation_span(bank_id: str) -> Iterator[trace.Span | None]:
+    """One independent trace for a many-input job, shared by all its batches."""
+    from opentelemetry.context import Context
+
+    if not _tracing_enabled:
+        yield None
+        return
+    # The request that scheduled a bank-wide job is not its sole source. In
+    # particular, SyncTaskBackend must not attribute it to the current retain.
+    with _tracer.start_as_current_span("hindsight.consolidation", context=Context()) as span:
+        span.set_attribute("hindsight.operation", "consolidation")
+        span.set_attribute("hindsight.bank_id", bank_id)
+        token = _consolidation_trace.set(_ConsolidationTrace(span))
+        try:
+            yield span
+        finally:
+            _consolidation_trace.reset(token)
+
+
+def link_consolidation_origin(traceparent: str | None, tracestate: str | None = None) -> None:
+    """Link a consumed memory's originating span once per consolidation run."""
+    from opentelemetry.context import Context
+    from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
+
+    current = _consolidation_trace.get()
+    if current is None or not current.span.is_recording() or not isinstance(traceparent, str):
+        return
+    carrier = {"traceparent": traceparent}
+    if isinstance(tracestate, str):
+        carrier["tracestate"] = tracestate
+    extracted = TraceContextTextMapPropagator().extract(carrier, context=Context())
+    origin = trace.get_current_span(extracted).get_span_context()
+    if not origin.is_valid:
+        return
+    key = (origin.trace_id, origin.span_id)
+    if key in current.linked:
+        return
+    if len(current.linked) >= MAX_CONSOLIDATION_LINKS:
+        current.span.set_attribute("hindsight.consolidation.links_truncated", True)
+        return
+    current.linked.add(key)
+    current.span.add_link(origin)
 
 
 # Key under which the W3C trace context travels inside a task payload. Named

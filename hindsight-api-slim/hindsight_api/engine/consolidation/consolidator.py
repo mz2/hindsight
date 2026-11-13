@@ -44,6 +44,7 @@ from ...extensions.operation_validator import (
 )
 from ...metrics import get_metrics_collector
 from ...operation_runs import timed_operation
+from ...tracing import create_consolidation_span, link_consolidation_origin
 from ...worker.stage import set_stage
 from ..bank_life import assert_job_bank_alive
 from ..db import DatabaseBackend
@@ -1733,6 +1734,8 @@ async def _fetch_unconsolidated_rows(
             "tags": list(m.tags or []),
             "mentioned_at": m.mentioned_at,
             "observation_scopes": m.observation_scopes,
+            "origin_traceparent": m.origin_traceparent,
+            "origin_tracestate": m.origin_tracestate,
             # Read-time version: the write re-checks it (see _sources_changed_since_read).
             "updated_at": m.updated_at,
         }
@@ -1846,41 +1849,44 @@ async def run_consolidation_job(
     Returns:
         Dict with consolidation results
     """
-    # Resolve bank-specific config with hierarchical overrides
-    config = await memory_engine._config_resolver.resolve_full_config(bank_id, request_context)
+    with create_consolidation_span(bank_id):
+        # Resolve bank-specific config with hierarchical overrides
+        config = await memory_engine._config_resolver.resolve_full_config(bank_id, request_context)
 
-    # Build a configured LLM wrapper that applies per-bank settings (e.g. safety settings)
-    # to every call without leaking across operations.
-    llm_config = memory_engine._consolidation_llm_config.with_config(config, bank_id=bank_id, operation="consolidation")
+        # Build a configured LLM wrapper that applies per-bank settings (e.g. safety settings)
+        # to every call without leaking across operations.
+        llm_config = memory_engine._consolidation_llm_config.with_config(
+            config, bank_id=bank_id, operation="consolidation"
+        )
 
-    # Bind the operation trace context for the whole run so the create/update DB
-    # sites (deep inside _process_memory_batch) can accumulate the observations
-    # this consolidation produced and the source memories it consumed onto the
-    # trace — flushed onto every trace row on exit by attach_memory_ids.
-    trace_ctx = trace_context_of(llm_config)
-    trace_token = set_trace_context(trace_ctx) if trace_ctx is not None else None
-    # One run per consolidation, whichever way it started: a queued task, or run inline.
-    with timed_operation("consolidation", bank_id), track_observation_changes() as observation_changes:
-        try:
-            return await _run_consolidation_job(
-                memory_engine,
-                bank_id,
-                request_context,
-                config,
-                llm_config,
-                operation_id,
-                observation_scopes,
-                pending_refresh_tags,
-                caller_requested,
-            )
-        finally:
-            if trace_token is not None:
-                reset_trace_context(trace_token)
-                # Fire-and-forget: patched on a background task, off the consolidation
-                # critical path.
-                memory_engine._llm_recorder.attach_memory_ids(trace_ctx)
-            # Also on failure: every batch that got this far committed its writes.
-            await record_consolidation_events(memory_engine._backend, bank_id, observation_changes, operation_id)
+        # Bind the operation trace context for the whole run so the create/update DB
+        # sites (deep inside _process_memory_batch) can accumulate the observations
+        # this consolidation produced and the source memories it consumed onto the
+        # trace — flushed onto every trace row on exit by attach_memory_ids.
+        trace_ctx = trace_context_of(llm_config)
+        trace_token = set_trace_context(trace_ctx) if trace_ctx is not None else None
+        # One run per consolidation, whichever way it started: a queued task, or run inline.
+        with timed_operation("consolidation", bank_id), track_observation_changes() as observation_changes:
+            try:
+                return await _run_consolidation_job(
+                    memory_engine,
+                    bank_id,
+                    request_context,
+                    config,
+                    llm_config,
+                    operation_id,
+                    observation_scopes,
+                    pending_refresh_tags,
+                    caller_requested,
+                )
+            finally:
+                if trace_token is not None:
+                    reset_trace_context(trace_token)
+                    # Fire-and-forget: patched on a background task, off the consolidation
+                    # critical path.
+                    memory_engine._llm_recorder.attach_memory_ids(trace_ctx)
+                # Also on failure: every batch that got this far committed its writes.
+                await record_consolidation_events(memory_engine._backend, bank_id, observation_changes, operation_id)
 
 
 async def _run_consolidation_job(
@@ -2746,6 +2752,8 @@ async def _process_memory_batch(
     """
     # Map the source memories this batch consumes onto the consolidation trace.
     record_source_memory_ids([str(m["id"]) for m in memories])
+    for memory in memories:
+        link_consolidation_origin(memory.get("origin_traceparent"), memory.get("origin_tracestate"))
 
     # Determine effective tag scope for observations.
     # When obs_tags_override is set, use it; otherwise use the memory's own tags.

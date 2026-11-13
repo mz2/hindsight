@@ -17,6 +17,7 @@ dependencies = [
     "uvicorn>=0.30.0",
     "pydantic>=2",
     "hindsight-client",
+    "opentelemetry-proto>=1.44.0",
 ]
 
 [tool.uv.sources]

@@ -49,7 +49,8 @@ from ..base import MemoryScopeWatermark, ScanPage, StoredMemory
 _MEMORY_COLUMNS = """
     id, text, fact_type, context, document_id, chunk_id, tags, metadata,
     proof_count, event_date, occurred_start, occurred_end, mentioned_at,
-    created_at, updated_at, source_memory_ids, consolidated_at, observation_scopes
+    created_at, updated_at, source_memory_ids, consolidated_at, observation_scopes,
+    origin_traceparent, origin_tracestate
 """
 
 # The scan's order. Fixed (created_at, id) like the export loader's, because an
@@ -111,6 +112,8 @@ def _stored_from_row(row: Any) -> StoredMemory:
     source_ids = _column(row, "source_memory_ids") or []
     return StoredMemory(
         unit_id=str(row["id"]),
+        origin_traceparent=_column(row, "origin_traceparent"),
+        origin_tracestate=_column(row, "origin_tracestate"),
         text=row["text"],
         fact_type=row["fact_type"],
         context=_column(row, "context"),
