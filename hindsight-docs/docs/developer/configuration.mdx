@@ -2972,6 +2972,25 @@ separate, per-operation history identifier, and memory attribution is scoped to
 that identifier and the bank. History span IDs are not OpenTelemetry span IDs.
 Caller labels are not added to baggage by Hindsight.
 
+Consolidation combines memories from potentially several requests. Each run starts
+its own trace and links to the retain spans that supplied the memories it processes.
+The originating W3C trace identifiers are saved with each memory, in the same write,
+so these links survive worker restarts and request-history cleanup. They are also
+saved when model-call history is disabled. Existing memories without saved trace
+identifiers remain usable but cannot supply a link.
+
+Links are deduplicated by originating span. A run records at most 128 distinct
+origins and sets `hindsight.consolidation.links_truncated=true` if more contribute;
+the OpenTelemetry SDK's configured link limit can reduce that further. The saved
+identifiers follow the memory through invalidation and restoration and are removed
+with it on deletion. Memory-store extensions receive `origin_traceparent` and
+`origin_tracestate` on `FactRecord` (also in its metadata bag) and must return them
+on `StoredMemory` when reading consolidation inputs.
+
+The consolidation trace identifies the model calls made by that run. Its links
+identify contributing requests; applications choose their own rule for dividing
+the cost between those requests.
+
 **OTLP-Compatible Backends:**
 
 The tracing implementation uses standard OTLP HTTP protocol, so it works with any OTLP-compatible backend:

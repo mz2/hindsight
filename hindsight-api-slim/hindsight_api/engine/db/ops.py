@@ -421,6 +421,8 @@ class DataAccessOps(ABC):
         text_signals_list: list,
         attachment_ids_list: list,
         text_search_extension: str = "native",
+        origin_traceparent: str | None = None,
+        origin_tracestate: str | None = None,
     ) -> list[str]:
         """Batch-insert facts, returning IDs.
 

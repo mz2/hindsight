@@ -20,6 +20,7 @@ from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING, Any
 
 from ....config import get_config
+from ....tracing import current_memory_trace_origin
 from ...document_history import note_observations_removed
 from ..base import StoredMemory
 
@@ -121,6 +122,7 @@ async def insert_facts(
     # unnest (PG) vs row-by-row (Oracle) transparently.
     config = get_config()
 
+    origin = current_memory_trace_origin()
     return await ops.insert_facts_batch(
         conn,
         bank_id,
@@ -140,6 +142,8 @@ async def insert_facts(
         text_signals_list,
         attachment_ids_list,
         text_search_extension=config.text_search_extension,
+        origin_traceparent=origin.traceparent,
+        origin_tracestate=origin.tracestate,
     )
 
 
@@ -383,7 +387,7 @@ async def _archive_columns(conn, fq_table: Callable[[str], str]) -> str:
 _ARCHIVE_SELECT = (
     "id, text, fact_type, context, occurred_start, occurred_end, mentioned_at, "
     "document_id, chunk_id, tags, metadata, proof_count, event_date, created_at, "
-    "consolidated_at, entity_ids"
+    "consolidated_at, entity_ids, origin_traceparent, origin_tracestate"
 )
 
 
@@ -391,6 +395,8 @@ def _archived_stored(row: Any) -> StoredMemory:
     """Map an `invalidated_memory_units` row onto :class:`StoredMemory`."""
     return StoredMemory(
         unit_id=str(row["id"]),
+        origin_traceparent=row["origin_traceparent"],
+        origin_tracestate=row["origin_tracestate"],
         text=row["text"],
         fact_type=row["fact_type"],
         context=row["context"],

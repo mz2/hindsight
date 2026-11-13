@@ -243,6 +243,8 @@ class PostgreSQLOps(DataAccessOps):
         text_signals_list: list,
         attachment_ids_list: list,
         text_search_extension: str = "native",
+        origin_traceparent: str | None = None,
+        origin_tracestate: str | None = None,
     ) -> list[str]:
         from ...config import get_config
 
@@ -269,7 +271,7 @@ class PostgreSQLOps(DataAccessOps):
             )
             INSERT INTO {table} (bank_id, text, embedding, event_date, occurred_start, occurred_end, mentioned_at,
                                  context, fact_type, metadata, chunk_id, document_id, tags,
-                                 observation_scopes, text_signals, attachment_ids{sv_insert_col})
+                                 observation_scopes, text_signals, attachment_ids, origin_traceparent, origin_tracestate{sv_insert_col})
             SELECT
                 $1,
                 text, embedding, event_date, occurred_start, occurred_end, mentioned_at,
@@ -286,7 +288,7 @@ class PostgreSQLOps(DataAccessOps):
                 COALESCE(
                     (SELECT array_agg(elem) FROM jsonb_array_elements_text(attachment_ids_json) AS elem),
                     '{{}}'::text[]
-                ){sv_select_val}
+                ), $17::text, $18::text{sv_select_val}
             FROM input_data
             RETURNING id
         """
@@ -309,6 +311,8 @@ class PostgreSQLOps(DataAccessOps):
             observation_scopes_list,
             text_signals_list,
             attachment_ids_list,
+            origin_traceparent,
+            origin_tracestate,
         )
         return [str(row["id"]) for row in results]
 

@@ -111,6 +111,8 @@ META_DOCUMENT_ID = "document_id"
 META_CHUNK_ID = "chunk_id"
 META_METADATA_JSON = "metadata_json"
 META_OBSERVATION_SCOPES = "observation_scopes"
+META_ORIGIN_TRACEPARENT = "origin_traceparent"
+META_ORIGIN_TRACESTATE = "origin_tracestate"
 META_TEXT_SIGNALS = "text_signals"
 META_CREATED_AT = "created_at"
 #: When the memory last changed, and the contract every write path owes it (#3490):
@@ -355,6 +357,10 @@ class StoredMemory:
     # Short ids of the attachments this fact was drawn from (see META_ATTACHMENT_IDS).
     # Carried so the list and detail views resolve them from this read alone.
     attachment_ids: list[str] = field(default_factory=list)
+
+    # Originating retain span, retained independently of model-call history.
+    origin_traceparent: str | None = None
+    origin_tracestate: str | None = None
 
 
 @dataclass
@@ -608,9 +614,17 @@ class FactRecord:
     # `memory_units.attachment_ids`. Empty for a fact stated in plain text.
     attachment_ids: list[str] = field(default_factory=list)
 
+    # Originating retain span, retained independently of model-call history.
+    origin_traceparent: str | None = None
+    origin_tracestate: str | None = None
+
     def metadata_bag(self) -> dict[str, str]:
         """Render the non-modelled columns as an opaque str→str bag."""
         bag: dict[str, str] = {}
+        if self.origin_traceparent:
+            bag[META_ORIGIN_TRACEPARENT] = self.origin_traceparent
+        if self.origin_tracestate:
+            bag[META_ORIGIN_TRACESTATE] = self.origin_tracestate
         if self.context:
             bag[META_CONTEXT] = self.context
         if self.document_id:
@@ -687,6 +701,9 @@ def build_fact_records(
     Only called by implementations that own the store — the Postgres one already
     wrote all of this and never builds a record.
     """
+    from ...tracing import current_memory_trace_origin
+
+    origin = current_memory_trace_origin()
     now = datetime.now(timezone.utc)
     records: list[FactRecord] = []
     for index, (unit_id, fact) in enumerate(zip(unit_ids, facts)):
@@ -708,6 +725,8 @@ def build_fact_records(
         records.append(
             FactRecord(
                 unit_id=str(unit_id),
+                origin_traceparent=origin.traceparent,
+                origin_tracestate=origin.tracestate,
                 text=fact.fact_text,
                 # Unpacked here on purpose: `FactRecord` is the contract every store
                 # implementation reads, and retain's packed `array("f")` is an internal
@@ -4650,6 +4669,8 @@ __all__ = [
     "META_DOCUMENT_ID",
     "META_METADATA_JSON",
     "META_OBSERVATION_SCOPES",
+    "META_ORIGIN_TRACEPARENT",
+    "META_ORIGIN_TRACESTATE",
     "META_SOURCE_KEY_PREFIX",
     "META_SOURCE_MEMORY_IDS",
     "META_TEXT_SIGNALS",

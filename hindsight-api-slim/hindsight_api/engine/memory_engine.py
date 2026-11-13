@@ -13601,20 +13601,18 @@ class MemoryEngine(MemoryEngineInterface):
 
         from .consolidation import run_consolidation_job
 
-        # Create parent span for consolidation operation
-        with create_operation_span("consolidation", bank_id):
-            result = await run_consolidation_job(
-                memory_engine=self,
-                bank_id=bank_id,
-                request_context=request_context,
-            )
+        result = await run_consolidation_job(
+            memory_engine=self,
+            bank_id=bank_id,
+            request_context=request_context,
+        )
 
-            return {
-                "processed": result.get("processed", 0),
-                "created": result.get("created", 0),
-                "updated": result.get("updated", 0),
-                "skipped": result.get("skipped", 0),
-            }
+        return {
+            "processed": result.get("processed", 0),
+            "created": result.get("created", 0),
+            "updated": result.get("updated", 0),
+            "skipped": result.get("skipped", 0),
+        }
 
     async def get_graph_data(
         self,
